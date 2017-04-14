@@ -8,7 +8,49 @@ import subprocess
 from subprocess import CalledProcessError
 from jinja2 import Environment, FileSystemLoader
 
+class Logger():
+    W  = '\033[0m'  # white (normal)
+    R  = '\033[31m' # red
+    G  = '\033[32m' # green
+    O  = '\033[33m' # orange
+    B  = '\033[34m' # blue
+    P  = '\033[35m' # purple
+
+    def __init__(self):
+        self.summary_list = {}
+
+    def info(self, message):
+        print(("{}INFO{} %s" % message).format(Logger.B, Logger.W))
+
+    def debug(self, message):
+        print(("{}DEBUG{} %s" % message).format(Logger.P, Logger.W))
+
+    def warn(self, message):
+        print(("{}WARN{} %s" % message).format(Logger.O, Logger.W))
+
+    def error(self, message):
+        print(("{}ERROR{} %s" % message).format(Logger.R, Logger.W))
+
+    def summary_ok(self, phase, message):
+        if not self.summary_list.has_key(phase):
+            self.summary_list[phase] = []
+        self.summary_list[phase].append(("OK", message))
+
+    def summary_fail(self, phase, message, error):
+        if not self.summary_list.has_key(phase):
+            self.summary_list[phase] = []
+        self.summary_list[phase].append(("Failed", message, error))
+
+    def summary(self, phases):
+        for phase in phases:
+            if self.summary_list.has_key(phase):
+                for s in self.summary_list[phase]:
+                    if s[0] == "OK":
+                        print ("{}%s %s{}" % (s[0], s[1])).format(Logger.G, Logger.W)
+                    else:
+                        print ("{}%s %s - %s{}" % (s[0], s[1], s[2])).format(Logger.R, Logger.W)
 class Image():
+    logger = Logger()
     name_string = "[A-Za-z0-9/:._-]+"
     name_pattern = re.compile("^%s$" % name_string)
     parents_string = "%s(,%s)*" % (name_string, name_string)
@@ -79,7 +121,7 @@ class Image():
                 except Exception as e:
                 #except:
                     #e = sys.exc_info()[0]
-                    print "WARN Ignored %s's mapping %s due to %s" % (self.name, mappings_value, e)
+                    self.logger.warn("Ignored %s's mapping %s due to %s" % (self.name, mappings_value, e))
     def member_of(self, member, list):
         '''
         May raise ValueError, IndexError
@@ -108,18 +150,38 @@ class LocalDocker:
     def image_of(self, name, version):
         return type('',(object,),{'name':name,'version':version})()
 
+    def execute(self, command, quiet=False):
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        lines = []
+        # Poll process for new output until finished
+        while True:
+            nextline = process.stdout.readline()
+            if nextline == '' and process.poll() is not None:
+                break
+            if not quiet:
+                sys.stdout.write(nextline)
+                sys.stdout.flush()
+            lines.append(nextline)
+
+        exitCode = process.returncode
+
+        if (exitCode == 0):
+            return lines
+        else:
+            raise RuntimeError("Command %s returns %i %s" % (command, exitCode, process.communicate()[0]))
+
     def cache_images(self):
         try:
-            output_images = subprocess.check_output(['docker', 'images'])
+            output_images = self.execute('docker images', True)
         except CalledProcessError as e:
             raise RuntimeError(e)
-        lines = output_images.split('\n')
-        if len(lines) == 0:
+        if len(output_images) == 0:
             raise RuntimeError("No output when cache images %s" % output_images)
-        if not LocalDocker.header_pattern.match(lines[0]):
+        if not LocalDocker.header_pattern.match(output_images[0]):
             raise RuntimeError("Bad output when cache images %s " % output_images)
 
-        for line in lines[1:]:
+        for line in output_images[1:]:
             tokens = re.compile("\s+").split(line)
             if len(tokens) > 2:
                 image = self.image_of(tokens[0], tokens[1])
@@ -127,10 +189,7 @@ class LocalDocker:
 
     def build_image(self, name, version, path):
         try:
-            output_build = subprocess.check_output([
-                'docker', 'build',
-                '-t', name + ':' + version,
-                path])
+            output_build = self.execute("docker build -t %s:%s %s" % (name, version, path))
         except CalledProcessError as e:
             raise RuntimeError(e)
         #print output_build
@@ -139,8 +198,7 @@ class LocalDocker:
 
     def push_image(self, name, version):
         try:
-            output_push = subprocess.check_output([
-                'docker', 'push', name + ':' + version])
+            output_push = subprocess.check_output("docker push %s:%s" % (name, version))
         except CalledProcessError as e:
             raise RuntimeError(e)
 
@@ -151,6 +209,7 @@ class LocalDocker:
         return False
 
 class Project:
+    logger = Logger()
     env = Environment(loader=FileSystemLoader('images'))
     build_dir = "./build"
     image_dir = "./images"
@@ -196,7 +255,7 @@ suffix={{g.suffix}}
         default_dockerfile = 'Dockerfile.j2'
         default_package_file = 'package.j2'
         walk_dir = os.path.abspath(Project.image_dir)
-        print "Will walk directory %s for image definitions" % walk_dir
+        self.logger.info("Will walk directory %s for image definitions" % walk_dir)
 
         for root, subdirs, files in os.walk(walk_dir):
             relative_path = os.path.relpath(root, walk_dir)
@@ -218,7 +277,7 @@ suffix={{g.suffix}}
                         raise RuntimeError("duplicated image name")
                     self.classes.append(image)
                 except RuntimeError as e:
-                    print "WARN Ignored path %s due to Error %s" % (package_file_path, e)
+                    self.logger.warn("Ignored path %s due to Error %s" % (package_file_path, e))
 
         for i in self.classes:
             i.parent_images = []
@@ -237,6 +296,10 @@ suffix={{g.suffix}}
 
     def make_plan(self, parsed):
         self.action = parsed.action
+        try:
+            self.force_parents = parsed.parents
+        except AttributeError:
+            self.force_parents = False
 
         self.to_act = []
         if parsed.name == None:
@@ -247,7 +310,7 @@ suffix={{g.suffix}}
             name = parsed.name
             if not "/" in parsed.name and not name.startswith(self.prefix) and self.prefix != "":
                 name = self.prefix + name
-                print "WARN Replace name %s with %s when prefix is defined" % (parsed.name, name)
+                self.logger.warn("Replace name %s with %s when prefix is defined" % (parsed.name, name))
             if parsed.version == None:
                 filtered = filter(lambda c: c.name == name, self.classes)
                 if len(filtered) > 0:
@@ -267,13 +330,19 @@ suffix={{g.suffix}}
     def take_action(self):
         if self.action == "generate":
             self.generate_dockerfiles()
+            self.logger.summary(['generate'])
         elif self.action == "build":
             self.generate_dockerfiles()
             self.build_images()
+            self.logger.summary(['generate', 'build'])
         elif self.action == "push":
             self.generate_dockerfiles()
             self.build_images()
             self.push_images()
+            self.logger.summary(['generate', 'build', 'push'])
+        elif self.action == "clean":
+            self.clean_images()
+            self.logger.summary(['clean'])
 
     def generate_dockerfiles(self):
         if os.path.isdir(Project.build_dir):
@@ -287,11 +356,13 @@ suffix={{g.suffix}}
             v = cv[1]
             try:
                 self.generate_dockerfile(c, v)
+                self.logger.summary_ok("generate", "generate Dockerfile for %s:%s" % (c.name, v))
             except RuntimeError as e:
                 bad_cvs.append(cv)
-                print "WARN Ignored generating Dockerfile for %s:%s due to " \
+                self.logger.warn("Ignored generating Dockerfile for %s:%s due to " \
                 "one or more of its parent versions not found in mappings: %s" % \
-                (c.name, v, e)
+                (c.name, v, e))
+                self.logger.summary_fail("generate", "generate Dockerfile for %s:%s" % (c.name, v), e)
         for cv in bad_cvs:
             self.to_act.remove(cv)
 
@@ -330,9 +401,11 @@ suffix={{g.suffix}}
             v = cv[1]
             try:
                 self.build_image(c, v)
+                self.logger.summary_ok("build", "build image %s:%s" % (c.name, v))
             except RuntimeError as e:
-                print "WARN Failed to build image %s version %s due to %s" % \
-                (c.name, v, e)
+                self.logger.warn("Failed to build image %s version %s due to %s" % \
+                (c.name, v, e))
+                self.logger.summary_fail("build", "build image %s:%s" % (c.name, v), e)
 
     def build_image(self, c, v):
         if c.mappings.has_key(v):
@@ -340,12 +413,13 @@ suffix={{g.suffix}}
             parent_version = c.mappings[v][1]
             parent_index = c.parents.index(parent_name) # parent_name must be in parents because of mappings parsing
             parent_image = c.parent_images[parent_index]
-            if parent_image != None and not self.docker.cached_image(parent_name, parent_version):
-                self.build_image(parent_image, parent_version)
+            if parent_image != None:
+                if self.force_parents or not self.docker.cached_image(parent_name, parent_version):
+                    self.build_image(parent_image, parent_version)
         else:
             raise RuntimeError("Image %s's mappings do not contain version %s" % (c.name, v))
 
-        print "INFO Build image %s:%s ..." % (c.name, v)
+        self.logger.info("Build image %s:%s ..." % (c.name, v))
         path = Project.build_dir + "/" + os.path.basename(c.name) + "/" + v
         self.docker.build_image(c.name, v, path)
 
@@ -355,30 +429,77 @@ suffix={{g.suffix}}
             v = cv[1]
             try:
                 self.push_image(c, v)
+                self.logger.summary_ok("push", "push image %s:%s" % (c.name, v))
             except RuntimeError as e:
-                print "WARN Failed to push image %s version %s due to %s" % \
-                (c.name, v, e)
+                self.logger.warn("Failed to push image %s version %s due to %s" % \
+                (c.name, v, e))
+                self.logger.summary_fail("push", "push image %s:%s" % (c.name, v), e)
 
     def push_image(self, c, v):
-        print "INFO Push image %s:%s ..." % (c.name, v)
+        if c.mappings.has_key(v):
+            parent_name = c.mappings[v][0]
+            parent_version = c.mappings[v][1]
+            parent_index = c.parents.index(parent_name) # parent_name must be in parents because of mappings parsing
+            parent_image = c.parent_images[parent_index]
+            if parent_image != None and self.force_parents:
+                self.push_image(parent_image, parent_version)
+
+        self.logger.info("Push image %s:%s ..." % (c.name, v))
         self.docker.push_image(c.name, v)
+
+    def clean_images(self):
+        for cv in self.to_act:
+            c = cv[0]
+            v = cv[1]
+            try:
+                self.clean_image(c, v)
+                self.logger.summary_ok("clean", "clean image %s:%s" % (c.name, v))
+            except RuntimeError as e:
+                self.logger.warn("Failed to clean image %s version %s due to %s" % \
+                (c.name, v, e))
+                self.logger.summary_fail("clean", "clean image %s:%s" % (c.name, v), e)
+
+    def clean_image(self, c, v):
+        if c.mappings.has_key(v):
+            parent_name = c.mappings[v][0]
+            parent_version = c.mappings[v][1]
+            parent_index = c.parents.index(parent_name) # parent_name must be in parents because of mappings parsing
+            parent_image = c.parent_images[parent_index]
+            if parent_image != None and self.force_parents:
+                self.clean_image(parent_image, parent_version)
+
+        self.logger.info("Clean image %s:%s ..." % (c.name, v))
+        class_dir = Project.build_dir + "/" + os.path.basename(c.name)
+        version_dir = class_dir + "/" + v
+        if os.path.isdir(version_dir):
+            shutil.rmtree(version_dir)
 
 if __name__ == "__main__":
     """
     python dib.py [operation] [options]
     operation:
         generate [-n <name>] [-v <version>]
-        build [-n <name>] [-v <version>]
-        push [-n <name>] [-v <version>]
-        clean [-n <name>] [-v <version>]
+        build [-n <name>] [-v <version>] [-p]
+        push [-n <name>] [-v <version>] [-p]
+        clean [-n <name>] [-v <version>] [-p]
     """
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(help='actions', dest="action")
     parser_subs = []
     parser_subs.append(subparsers.add_parser('generate', help='generate Dockerfiles based on templates'))
-    parser_subs.append(subparsers.add_parser('build', help='build images on generated Dockerfiles'))
-    parser_subs.append(subparsers.add_parser('push', help='push built images'))
-    parser_subs.append(subparsers.add_parser('clean', help='clean build directory'))
+
+    parser_build = subparsers.add_parser('build', help='build images on generated Dockerfiles')
+    parser_build.add_argument('-p', '--parents', action="store_true", help="force build dependent parent images")
+    parser_subs.append(parser_build)
+
+    parser_push = subparsers.add_parser('push', help='push built images')
+    parser_push.add_argument('-p', '--parents', action="store_true", help="force push dependent parent images")
+    parser_subs.append(parser_push)
+
+    parser_clean = subparsers.add_parser('clean', help='clean build directory')
+    parser_clean.add_argument('-p', '--parents', action="store_true", help="force clean dependent parent images' build directories")
+    parser_subs.append(parser_clean)
+
     for sub in parser_subs:
         sub.add_argument('-n', '--name', help='image name')
         sub.add_argument('-v', '--version', help='image version')
@@ -390,4 +511,4 @@ if __name__ == "__main__":
         project.make_plan(parsed)
         project.take_action()
     except RuntimeError as e:
-        print "ERROR %s" % e
+        self.logger.error("%s" % e)
