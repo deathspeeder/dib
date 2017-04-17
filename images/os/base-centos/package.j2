@@ -1,0 +1,6 @@
+{% import 'macros.j2' as g -%}
+name = {{g.prefix}}base-centos
+versions=6,7
+type=class
+parents={{g.hub}}/centos
+mappings=6:[0]:6,7:[0]:7

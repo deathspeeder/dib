@@ -1,0 +1,7 @@
+{% import 'macros.j2' as g -%}
+FROM {{parent}}:{{parent_version}}
+
+ENV http_proxy {{g.proxy}}
+ENV https_proxy {{g.proxy}}
+
+RUN apt-get update

@@ -1,0 +1,25 @@
+FROM {{parent}}:{{parent_version}}
+
+ENV NOTVISIBLE "in users profile"
+
+WORKDIR /opt/work
+
+{% if version == '1.6.3' %}
+ENV SPARK_RESOURCE http://archive.apache.org/dist/spark/spark-1.6.3/spark-1.6.3-bin-hadoop2.6.tgz
+ENV SPARK_TGZ spark-1.6.3-bin-hadoop2.6.tgz
+ENV SPARK_HOME /opt/work/spark-1.6.3-bin-hadoop2.6
+{% elif version == '2.0.0' %}
+ENV SPARK_RESOURCE http://archive.apache.org/dist/spark/spark-2.0.0/spark-2.0.0-bin-hadoop2.7.tgz
+ENV SPARK_TGZ spark-2.0.0-bin-hadoop2.7.tgz
+ENV SPARK_HOME /opt/work/spark-2.0.0-bin-hadoop2.7
+{% else %}
+ENV SPARK_RESOURCE http://archive.apache.org/dist/spark/spark-2.1.0/spark-2.1.0-bin-hadoop2.7.tgz
+ENV SPARK_TGZ spark-2.1.0-bin-hadoop2.7.tgz
+ENV SPARK_HOME /opt/work/spark-2.1.0-bin-hadoop2.7
+{% endif %}
+
+RUN wget $SPARK_RESOURCE && \
+    tar zxf $SPARK_TGZ && \
+    rm $SPARK_TGZ
+
+ADD spark-defaults.conf $SPARK_HOME/conf/spark-defaults.conf
